@@ -1,0 +1,272 @@
+services:
+  mysql:
+    image: mysql:5.7
+    container_name: jambonz-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: admin
+      MYSQL_DATABASE: jambones
+    volumes:
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+      - mysql-data:/var/lib/mysql
+    networks:
+      - jambonz-net
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-padmin" ]
+      timeout: 20s
+      retries: 10
+
+  redis:
+    image: redis:alpine
+    container_name: jambonz-redis
+    restart: always
+    networks:
+      - jambonz-net
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  drachtio:
+    image: drachtio/drachtio-server:latest
+    container_name: jambonz-drachtio
+    restart: always
+    command: drachtio -f /etc/drachtio.conf.xml
+    volumes:
+      - ./drachtio.conf.xml:/etc/drachtio.conf.xml
+    ports:
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "9022:9022"
+    networks:
+      - jambonz-net
+
+  influxdb:
+    image: influxdb:1.8
+    container_name: jambonz-influxdb
+    restart: always
+    environment:
+      INFLUXDB_DB: jambonz
+    networks:
+      - jambonz-net
+
+  freeswitch:
+    image: drachtio/drachtio-freeswitch-mrf:latest
+    container_name: jambonz-freeswitch
+    restart: always
+    command: >
+      freeswitch -nonat -rp
+    ports:
+      - "8021:8021/tcp"
+      - "30000-30100:30000-30100/udp"
+    volumes:
+      - ./freeswitch/log:/var/log/freeswitch
+    networks:
+      - jambonz-net
+
+  rtpengine:
+    image: jambonz/rtpengine:latest
+    container_name: jambonz-rtpengine
+    restart: always
+    # rtpengine requires specific network args usually, but jambonz image might wrap it.
+    # We will assume it starts with defaults or we might need to adjust.
+    # Typical command if raw image: rtpengine --interface=internal/0.0.0.0 --listen-ng=22222 ...
+    # Let's see if it runs with default command.
+    ports:
+      - "22222:22222/udp"
+      - "40000-40100:40000-40100/udp"
+    cap_add:
+      - NET_ADMIN
+    networks:
+      - jambonz-net
+
+  sbc-inbound:
+    image: jambonz/sbc-inbound:latest
+    container_name: jambonz-sbc-inbound
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      drachtio:
+        condition: service_started
+      rtpengine:
+        condition: service_started
+    environment:
+      JAMBONES_MYSQL_HOST: mysql
+      JAMBONES_MYSQL_USER: root
+      JAMBONES_MYSQL_PASSWORD: admin
+      JAMBONES_MYSQL_DATABASE: jambones
+      JAMBONES_REDIS_HOST: redis
+      DRACHTIO_HOST: drachtio
+      DRACHTIO_PORT: 9022
+      DRACHTIO_SECRET: cymru
+      JAMBONES_RTPENGINES: rtpengine:22222
+      JAMBONES_LOGLEVEL: info
+      JAMBONES_TIME_SERIES_HOST: influxdb
+      JAMBONES_NETWORK_CIDR: 172.18.0.0/16
+      JWT_SECRET: whosyourdaddy
+    networks:
+      - jambonz-net
+
+  sbc-sip-sidecar:
+    image: jambonz/sbc-sip-sidecar:latest
+    container_name: jambonz-sbc-sip-sidecar
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      drachtio:
+        condition: service_started
+    environment:
+      JAMBONES_MYSQL_HOST: mysql
+      JAMBONES_MYSQL_USER: root
+      JAMBONES_MYSQL_PASSWORD: admin
+      JAMBONES_MYSQL_DATABASE: jambones
+      JAMBONES_REDIS_HOST: redis
+      DRACHTIO_HOST: drachtio
+      DRACHTIO_PORT: 9022
+      DRACHTIO_SECRET: cymru
+      JAMBONES_LOGLEVEL: debug
+      JAMBONES_TIME_SERIES_HOST: influxdb
+      JAMBONES_NETWORK_CIDR: 172.18.0.0/16
+      JWT_SECRET: whosyourdaddy
+      ENCRYPTION_SECRET: whosyourdaddy
+    networks:
+      - jambonz-net
+
+  sbc-outbound:
+    image: jambonz/sbc-outbound:latest
+    container_name: jambonz-sbc-outbound
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      drachtio:
+        condition: service_started
+      rtpengine:
+        condition: service_started
+    environment:
+      JAMBONES_MYSQL_HOST: mysql
+      JAMBONES_MYSQL_USER: root
+      JAMBONES_MYSQL_PASSWORD: admin
+      JAMBONES_MYSQL_DATABASE: jambones
+      JAMBONES_REDIS_HOST: redis
+      DRACHTIO_HOST: drachtio
+      DRACHTIO_PORT: 9022
+      DRACHTIO_SECRET: cymru
+      JAMBONES_RTPENGINES: rtpengine:22222
+      JAMBONES_LOGLEVEL: info
+      JAMBONES_TIME_SERIES_HOST: influxdb
+      JAMBONES_NETWORK_CIDR: 172.18.0.0/16
+      JWT_SECRET: whosyourdaddy
+    networks:
+      - jambonz-net
+
+  sbc-call-router:
+    image: jambonz/sbc-call-router:latest
+    container_name: jambonz-sbc-call-router
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      drachtio:
+        condition: service_started
+    environment:
+      JAMBONES_MYSQL_HOST: mysql
+      JAMBONES_MYSQL_USER: root
+      JAMBONES_MYSQL_PASSWORD: admin
+      JAMBONES_MYSQL_DATABASE: jambones
+      JAMBONES_REDIS_HOST: redis
+      DRACHTIO_HOST: drachtio
+      DRACHTIO_PORT: 9022
+      DRACHTIO_SECRET: cymru
+      JAMBONES_LOGLEVEL: info
+      JAMBONES_NETWORK_CIDR: 172.18.0.0/16
+      JWT_SECRET: whosyourdaddy
+    networks:
+      - jambonz-net
+
+  feature-server:
+    image: jambonz/feature-server:latest
+    container_name: jambonz-feature-server
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      drachtio:
+        condition: service_started
+    environment:
+      JAMBONES_MYSQL_HOST: mysql
+      JAMBONES_MYSQL_USER: root
+      JAMBONES_MYSQL_PASSWORD: admin
+      JAMBONES_MYSQL_DATABASE: jambones
+      JAMBONES_REDIS_HOST: redis
+      DRACHTIO_HOST: drachtio
+      DRACHTIO_PORT: 9022
+      DRACHTIO_SECRET: cymru
+      ENABLE_CDRS: 0
+      JAMBONES_LOGLEVEL: info
+      JWT_SECRET: whosyourdaddy
+      JAMBONES_TIME_SERIES_HOST: influxdb
+      JAMBONES_FREESWITCH: freeswitch:8021:JambonzR0ck$
+      JAMBONES_NETWORK_CIDR: 172.18.0.0/16
+      JAMBONES_SUBNET: 172.18.0.0/16
+    networks:
+      - jambonz-net
+
+  api-server:
+    image: jambonz/api-server:latest
+    container_name: jambonz-api-server
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      JAMBONES_MYSQL_HOST: mysql
+      JAMBONES_MYSQL_USER: root
+      JAMBONES_MYSQL_PASSWORD: admin
+      JAMBONES_MYSQL_DATABASE: jambones
+      JAMBONES_REDIS_HOST: redis
+      JAMBONES_LOGLEVEL: info
+      HTTP_PORT: 3000
+      JWT_SECRET: whosyourdaddy
+      JAMBONES_TIME_SERIES_HOST: influxdb
+    ports:
+      - "3000:3000"
+    networks:
+      - jambonz-net
+
+  webapp:
+    image: jambonz/webapp:latest
+    container_name: jambonz-webapp
+    restart: always
+    depends_on:
+      api-server:
+        condition: service_started
+    environment:
+      API_BASE_URL: http://localhost:3000/v1
+      HTTP_PORT: 3000
+    ports:
+      - "3001:3000"
+    networks:
+      - jambonz-net
+
+networks:
+  jambonz-net:
+    driver: bridge
+
+volumes:
+  mysql-data:

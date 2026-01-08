@@ -1,0 +1,17 @@
+<drachtio>
+    <!-- admin port for client (node.js app) connections -->
+    <admin port="9022" secret="cymru">0.0.0.0</admin>
+
+    <!-- sip configuration -->
+    <sip>
+        <contacts>
+            <contact external-ip="192.168.1.45">sip:*:5060;transport=udp,tcp</contact>
+        </contacts>
+    </sip>
+
+    <!-- logging configuration -->
+    <logging>
+        <loglevel>info</loglevel>
+        <sofia-loglevel>3</sofia-loglevel>
+    </logging>
+</drachtio>
