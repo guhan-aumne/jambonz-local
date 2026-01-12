@@ -100,14 +100,15 @@ services:
       JAMBONES_MYSQL_PASSWORD: admin
       JAMBONES_MYSQL_DATABASE: jambones
       JAMBONES_REDIS_HOST: redis
-      DRACHTIO_HOST: drachtio
-      DRACHTIO_PORT: 9022
+      # Using outbound connection mode - drachtio connects TO sbc-inbound
+      DRACHTIO_PORT: 4000
       DRACHTIO_SECRET: cymru
       JAMBONES_RTPENGINES: rtpengine:22222
-      JAMBONES_LOGLEVEL: info
+      JAMBONES_LOGLEVEL: debug
       JAMBONES_TIME_SERIES_HOST: influxdb
       JAMBONES_NETWORK_CIDR: 172.18.0.0/16
       JWT_SECRET: whosyourdaddy
+      ENCRYPTION_SECRET: whosyourdaddy
     networks:
       - jambonz-net
 
@@ -158,11 +159,11 @@ services:
       JAMBONES_MYSQL_PASSWORD: admin
       JAMBONES_MYSQL_DATABASE: jambones
       JAMBONES_REDIS_HOST: redis
-      DRACHTIO_HOST: drachtio
-      DRACHTIO_PORT: 9022
+      # Using outbound connection mode - drachtio connects TO sbc-outbound
+      DRACHTIO_PORT: 4001
       DRACHTIO_SECRET: cymru
       JAMBONES_RTPENGINES: rtpengine:22222
-      JAMBONES_LOGLEVEL: info
+      JAMBONES_LOGLEVEL: debug
       JAMBONES_TIME_SERIES_HOST: influxdb
       JAMBONES_NETWORK_CIDR: 172.18.0.0/16
       JWT_SECRET: whosyourdaddy
@@ -189,9 +190,14 @@ services:
       DRACHTIO_HOST: drachtio
       DRACHTIO_PORT: 9022
       DRACHTIO_SECRET: cymru
-      JAMBONES_LOGLEVEL: info
+      JAMBONES_LOGLEVEL: debug
       JAMBONES_NETWORK_CIDR: 172.18.0.0/16
       JWT_SECRET: whosyourdaddy
+      # Routes for drachtio outbound connections
+      JAMBONES_INBOUND_ROUTE: sbc-inbound:4000
+      JAMBONES_OUTBOUND_ROUTE: sbc-outbound:4001
+      # Docker bridge gateway IP - external calls arrive from this IP
+      DOCKER_BRIDGE_IP: 172.18.0.1
     networks:
       - jambonz-net
 
@@ -216,12 +222,17 @@ services:
       DRACHTIO_PORT: 9022
       DRACHTIO_SECRET: cymru
       ENABLE_CDRS: 0
-      JAMBONES_LOGLEVEL: info
+      JAMBONES_LOGLEVEL: debug
       JWT_SECRET: whosyourdaddy
+      ENCRYPTION_SECRET: whosyourdaddy
       JAMBONES_TIME_SERIES_HOST: influxdb
       JAMBONES_FREESWITCH: freeswitch:8021:JambonzR0ck$
       JAMBONES_NETWORK_CIDR: 172.18.0.0/16
       JAMBONES_SUBNET: 172.18.0.0/16
+      # Feature server registers its service URL in Redis
+      HTTP_PORT: 3000
+      # List of SBC addresses for feature-server to ping and register with
+      JAMBONES_SBCS: sbc-inbound
     networks:
       - jambonz-net
 

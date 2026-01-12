@@ -9,6 +9,11 @@
         </contacts>
     </sip>
 
+    <!-- route INVITEs via sbc-call-router for proper inbound/outbound routing -->
+    <request-handlers>
+        <request-handler sip-method="INVITE" http-method="POST" verify-peer="false">http://sbc-call-router:3000</request-handler>
+    </request-handlers>
+
     <!-- logging configuration -->
     <logging>
         <loglevel>debug</loglevel>
