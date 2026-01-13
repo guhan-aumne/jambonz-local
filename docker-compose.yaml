@@ -41,6 +41,12 @@ services:
       - "9022:9022"
     networks:
       - jambonz-net
+    healthcheck:
+      test: [ "CMD-SHELL", "bash -c '</dev/tcp/localhost/9022' || exit 1" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   influxdb:
     image: influxdb:1.8
@@ -141,7 +147,7 @@ services:
       - jambonz-net
 
   sbc-outbound:
-    image: jambonz/sbc-outbound:latest
+    image: jambonz/sbc-outbound:0.8.5
     container_name: jambonz-sbc-outbound
     restart: always
     depends_on:
@@ -211,7 +217,9 @@ services:
       redis:
         condition: service_healthy
       drachtio:
-        condition: service_started
+        condition: service_healthy
+    # Add delay to ensure drachtio is fully ready when sbc-pinger starts
+    entrypoint: [ "/bin/sh", "-c", "sleep 2 && exec npm start" ]
     environment:
       JAMBONES_MYSQL_HOST: mysql
       JAMBONES_MYSQL_USER: root
@@ -232,7 +240,7 @@ services:
       # Feature server registers its service URL in Redis
       HTTP_PORT: 3000
       # List of SBC addresses for feature-server to ping and register with
-      JAMBONES_SBCS: sbc-inbound
+      JAMBONES_SBCS: drachtio
     networks:
       - jambonz-net
 
@@ -272,6 +280,15 @@ services:
       HTTP_PORT: 3000
     ports:
       - "3001:3000"
+    networks:
+      - jambonz-net
+
+  webhook:
+    build: ./webhook
+    container_name: jambonz-webhook
+    restart: always
+    ports:
+      - "3002:3002"
     networks:
       - jambonz-net
 

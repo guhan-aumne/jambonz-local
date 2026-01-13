@@ -796,6 +796,7 @@ requires_register, register_username, register_password,
 register_sip_realm, tech_prefix, inbound_auth_username, inbound_auth_password, diversion)
 VALUES
 ('17479288-bb9f-421a-89d1-f4ac57af1dca', 'TelecomsXChange', 0, 0, 0, NULL, NULL, NULL, 'your-tech-prefix', NULL, NULL, NULL),
+
 ('7d509a18-bbff-4c5d-b21e-b99bf8f8c49a', 'Twilio', 0, 1, 0, '<your-twilio-credential-username>', '<your-twilio-credential-password>', NULL, NULL, NULL, NULL, NULL),
 ('032d90d5-39e8-41c0-b807-9c88cffba65c', 'Voxbone', 0, 1, 0, '<your-voxbone-outbound-username>', '<your-voxbone-outbound-password>', NULL, NULL, NULL, NULL, '<your-voxbone-DID>'),
 ('e6fb301a-1af0-4fb8-a1f6-f65530c6e1c6', 'Simwood', 0, 1, 0, '<your-simwood-auth-trunk-username>',  '<your-simwood-auth-trunk-password>', NULL, NULL, NULL, NULL, NULL);
@@ -858,3 +859,23 @@ insert into user_permissions (user_permissions_sid, user_sid, permission_sid)
 values ('d6fdf064-0a65-4b17-8b10-5500e956a159', '12c80508-edf9-4b22-8d09-55abd02648eb', 'ffbc3a10-546a-11ed-bdc3-0242ac120002');
 insert into user_permissions (user_permissions_sid, user_sid, permission_sid) 
 values ('f68185dd-0486-4767-a77d-a0b84c1b236e' ,'12c80508-edf9-4b22-8d09-55abd02648eb', 'ffbc3c5e-546a-11ed-bdc3-0242ac120002');
+
+-- add system information
+insert into system_information (domain_name, sip_domain_name, monitoring_domain_name, private_network_cidr, log_level)
+values ('jambonz.local', 'sip.jambonz.local', 'monitoring.jambonz.local', '172.18.0.0/16', 'debug');
+
+-- create local webhook application
+insert into webhooks (webhook_sid, url, method)
+values
+('e786934c-6a7f-44e2-861c-81498f328109', 'http://webhook:3002/call', 'POST'),
+('9be0a4f5-7e05-4c6e-88dc-c16f272a2754', 'http://webhook:3002/call-status', 'POST');
+
+insert into applications (application_sid, account_sid, name, call_hook_sid, call_status_hook_sid, speech_synthesis_vendor, speech_synthesis_language, speech_synthesis_voice, speech_recognizer_vendor, speech_recognizer_language)
+VALUES
+('597148a0-7b00-47b2-95f2-4503730e23ad', '9351f46a-678c-43f5-b8a6-d4eb58d131af', 'Local Webhook', 'e786934c-6a7f-44e2-861c-81498f328109', '9be0a4f5-7e05-4c6e-88dc-c16f272a2754', 'google', 'en-US', 'en-US-Wavenet-C', 'google', 'en-US');
+
+-- create one service provider and one account (UPDATED to use local webhook app)
+-- Original insert was on line 770, we will just update it at the end to be safe if this runs on fresh DB
+UPDATE accounts
+SET device_calling_application_sid = '597148a0-7b00-47b2-95f2-4503730e23ad'
+WHERE account_sid = '9351f46a-678c-43f5-b8a6-d4eb58d131af';

@@ -3,14 +3,16 @@ Minimal Jambonz Webhook Application
 Responds to inbound calls with a TTS greeting and hangs up.
 """
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 @app.route('/call', methods=['POST'])
 def handle_call():
     """Handle incoming call webhook from jambonz."""
-    # Log the incoming call (optional)
-    call_data = request.get_json() or {}
+    # Log the incoming call (use force=True to parse JSON regardless of content-type)
+    call_data = request.get_json(force=True, silent=True) or {}
     print(f"Incoming call from: {call_data.get('from', 'unknown')}")
     
     # Return jambonz call control JSON
@@ -29,7 +31,7 @@ def handle_call():
 @app.route('/call-status', methods=['POST'])
 def call_status():
     """Handle call status webhook (optional but recommended)."""
-    status = request.get_json() or {}
+    status = request.get_json(force=True, silent=True) or {}
     print(f"Call status: {status.get('call_status', 'unknown')}")
     return '', 200
 

@@ -403,3 +403,49 @@ Since `sip.jambonz.local` is not DNS-resolvable, the proxy field provides the IP
 | `configuration.md` | This documentation file |
 | `jambonz-api-server/` | Cloned for schema reference |
 | `freeswitch/` | FreeSWITCH log volume mount |
+
+---
+
+## Troubleshooting & Common Issues
+
+### ❌ Issue: Call Rejected (404/403) - Account Not Found
+**Symptoms**: SBC rejects calls with "Account not found" or "Forbidden".
+**Cause**: The SBC looks up the account using the SIP Realm (`sip.jambonz.local`). If MicroSIP sends the IP as the domain, lookup fails.
+**Solutions**:
+1.  **Preferred**: Configure "Domain" in MicroSIP to `sip.jambonz.local`.
+2.  **Alternative**: Append the Account SID to the URI explicitly:
+    `sip:1002@192.168.1.45?X-Account-Sid=<YOUR_ACCOUNT_SID>`
+
+### ❌ Issue: Webhook Interaction Failed (CORS)
+**Symptoms**: Feature server logs an error contacting the webhook, or call hangs.
+**Cause**: Jambonz feature server sends an HTTP `OPTIONS` request (Preflight) before `POST`. Standard Flask/Node apps may reject this.
+**Solution**: Enable CORS support in your webhook application.
+*   **Python (Flask)**: Use `flask_cors`.
+    ```python
+    from flask_cors import CORS
+    app = Flask(__name__)
+    CORS(app)
+    ```
+
+### ❌ Issue: Feature Server Bypasses Webhook (Direct Calling)
+**Symptoms**: Calling another registered user (e.g., 1001 -> 1002) rings the device directly instead of triggering your application logic.
+**Cause**: The `clients` table has `allow_direct_user_calling=1` by default.
+**Solution**: Disable direct calling flags for the user to force application logic.
+```sql
+UPDATE clients SET allow_direct_user_calling=0, allow_direct_queue_calling=0, allow_direct_app_calling=0 WHERE username='1001';
+```
+
+### ❌ Issue: Missing Application SID
+**Symptoms**: Call reaches Feature Server but errors out trying to find an application.
+**Cause**: The Account has no `device_calling_application_sid` configured.
+**Solution**: Link an Application to the Account in the database.
+```sql
+UPDATE accounts SET device_calling_application_sid='<APP_SID>' WHERE name='default account';
+```
+
+### ❌ Issue: Silence / One-way Audio
+**Symptoms**: Call connects but no audio.
+**Cause**: NAT/Firewall blocking RTP ports or incorrect IP advertising.
+**Solution**:
+1.  Update `external-ip` in `drachtio.conf.xml` to your actual LAN IP.
+2.  Open UDP ports `40000-40100` (RTPEngine) and `30000-30100` (FreeSWITCH) in Windows Firewall.
