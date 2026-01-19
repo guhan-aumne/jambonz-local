@@ -445,7 +445,184 @@ UPDATE accounts SET device_calling_application_sid='<APP_SID>' WHERE name='defau
 
 ### ❌ Issue: Silence / One-way Audio
 **Symptoms**: Call connects but no audio.
-**Cause**: NAT/Firewall blocking RTP ports or incorrect IP advertising.
-**Solution**:
-1.  Update `external-ip` in `drachtio.conf.xml` to your actual LAN IP.
 2.  Open UDP ports `40000-40100` (RTPEngine) and `30000-30100` (FreeSWITCH) in Windows Firewall.
+
+---
+
+### 9. Feature Server Routing Loop - Shared Drachtio Architecture Issue
+
+**Problem:** Calls with `X-Jambonz-Routing: app` header were failing with `603 Decline` and "no outbound carriers found" error. The webhook application was never invoked despite being configured correctly.
+
+**Symptoms:**
+- Call from User 1001 to User 1002 fails immediately
+- Logs show `sbc-inbound` correctly routes to Feature Server
+- Feature Server does not invoke webhook
+- Call gets forwarded to `sbc-outbound` which rejects with `603 Decline`
+- Error: `no outbound carriers found for account_sid`
+
+**Root Cause Analysis:**
+
+The issue was a **routing loop** caused by sharing a single Drachtio instance between SBCs and the Feature Server:
+
+1. `sbc-inbound` identifies the Feature Server location as `172.18.0.6:5060` (the main shared Drachtio container)
+2. `sbc-inbound` forwards the INVITE to `172.18.0.6:5060`
+3. The main Drachtio receives the looped call back to itself
+4. Feature Server fails to intercept the looped call (source/destination conflict)
+5. Main Drachtio falls back to consulting `sbc-call-router` for routing
+6. `sbc-call-router` sees User 1002 as a SIP destination and routes to `sbc-outbound`
+7. `sbc-outbound` rejects because there are no configured outbound carriers
+
+**Key Log Evidence:**
+```
+sbc-inbound: "using feature server 172.18.0.6:5060"
+drachtio: INVITE sent to sip:172.18.0.6:5060
+drachtio: processMessageStatelessly (looped call, no feature-server match)
+sbc-call-router: {"action":"route","data":{"uri":"sbc-outbound:4001"}}
+sbc-outbound: "no outbound carriers found for account_sid"
+```
+
+**Resolution:**
+
+Implemented a **dedicated sidecar Drachtio instance** for the Feature Server:
+
+**Architecture Change:**
+```diff
+Before (Shared Drachtio):
+  ┌──────────┐
+  │drachtio  │ ← Used by SBCs AND Feature Server
+  │(shared)  │   (causes routing loop)
+  └──────────┘
+
+After (Sidecar Pattern):
+  ┌──────────┐           ┌─────────────────────┐
+  │drachtio  │ ← SBCs    │feature-server-      │ ← Feature Server
+  │(main)    │           │drachtio (sidecar)   │   (isolated routing)
+  └──────────┘           └─────────────────────┘
+```
+
+**Implementation in `docker-compose.yaml`:**
+
+1. **Added new service `feature-server-drachtio`:**
+```yaml
+feature-server-drachtio:
+  image: drachtio/drachtio-server:latest
+  container_name: jambonz-feature-server-drachtio
+  restart: always
+  command: drachtio --contact "sip:*;transport=udp" --loglevel debug --sofia-loglevel 3 --address 0.0.0.0 --port 9022 --secret cymru
+  networks:
+    - jambonz-net
+```
+
+2. **Updated `feature-server` configuration:**
+```yaml
+feature-server:
+  depends_on:
+    feature-server-drachtio:
+      condition: service_started
+  environment:
+    DRACHTIO_HOST: feature-server-drachtio  # Changed from 'drachtio'
+```
+
+**Verification:**
+```bash
+# Restart services
+docker-compose up -d
+
+# Verify Feature Server connected to sidecar
+docker logs jambonz-feature-server --tail 50 | grep "connected to drachtio"
+# Expected: "connected to drachtio listening on udp/172.18.0.10:5060"
+```
+
+**Post-Fix Behavior:**
+- `sbc-inbound` now routes to Feature Server's dedicated sidecar (not the shared Drachtio)
+- Feature Server successfully intercepts calls with `X-Jambonz-Routing: app`
+- Webhook is invoked correctly
+- Call completes successfully with TTS greeting
+
+**Lesson:** In Jambonz architecture, the Feature Server should always have its own dedicated Drachtio sidecar to isolate application logic routing from SBC routing. Sharing a Drachtio instance between SBCs and Feature Server creates routing conflicts and loops.
+
+**Related Jambonz Documentation:**
+- Feature Server requires dedicated Drachtio connection for outbound call control
+- SBCs use the main Drachtio for SIP proxy functionality
+- This separation is standard in production Jambonz deployments
+
+---
+
+## Debugging Tips
+
+### Viewing Logs for Call Flow Analysis
+
+```bash
+# View all service logs in real-time
+docker-compose logs -f
+
+# Check specific service logs
+docker logs jambonz-feature-server --tail 100
+docker logs jambonz-sbc-inbound --tail 100
+docker logs jambonz-sbc-outbound --tail 100
+docker logs jambonz-drachtio --tail 100
+
+# Search for specific call-id
+docker-compose logs | grep "CALL_ID_HERE"
+
+# Check if Feature Server connected to Drachtio
+docker logs jambonz-feature-server | grep "connected to drachtio"
+```
+
+### Common Header Issues
+
+```
+X-Jambonz-Routing: app     → Routes to Feature Server (webhook application)
+X-Jambonz-Routing: sip     → Routes as standard SIP call (peer-to-peer or carrier)
+```
+
+If `X-Jambonz-Routing` is `sip` when you expect `app`:
+- User-to-User calls default to `sip` routing if the destination is a registered user
+- To force application logic, either:
+  - Dial a non-user number (e.g., `9999`)
+  - Set `allow_direct_user_calling=0` in the `clients` table
+  - Configure a DID/Phone Number assigned to the application
+
+---
+
+## Architecture Validation Checklist
+
+✅ **Verify Drachtio Sidecar for Feature Server:**
+```bash
+docker ps | grep drachtio
+# Should show TWO drachtio containers:
+# - jambonz-drachtio (main, for SBCs)
+# - jambonz-feature-server-drachtio (sidecar, for Feature Server)
+```
+
+✅ **Verify Feature Server Connection:**
+```bash
+docker logs jambonz-feature-server 2>&1 | grep "connected to drachtio"
+# Should connect to sidecar, NOT main drachtio
+```
+
+✅ **Check Service Dependencies:**
+```bash
+docker-compose config | grep -A 5 "feature-server:"
+# Should depend on feature-server-drachtio, not drachtio
+```
+
+---
+
+## Updated File Manifest
+
+| File | Purpose |
+|------|---------|
+| `docker-compose.yaml` | Complete microservices orchestration (13 services + sidecar) |
+| `init-db.sql` | Combined schema + seed data (from jambonz-api-server) |
+| `drachtio.conf.xml` | Main Drachtio SIP server configuration (for SBCs) |
+| `configuration.md` | This documentation file |
+| `jambonz-api-server/` | Cloned for schema reference |
+| `freeswitch/` | FreeSWITCH log volume mount |
+| `webhook/app.py` | Local webhook application (optional, for testing) |
+
+---
+
+**Document Version:** 2.0  
+**Last Updated:** 2026-01-19  
+**Status:** Feature Server routing loop resolved via sidecar Drachtio implementation

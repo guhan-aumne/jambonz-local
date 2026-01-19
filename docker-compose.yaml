@@ -207,6 +207,14 @@ services:
     networks:
       - jambonz-net
 
+  feature-server-drachtio:
+    image: drachtio/drachtio-server:latest
+    container_name: jambonz-feature-server-drachtio
+    restart: always
+    command: drachtio --contact "sip:*;transport=udp" --loglevel debug --sofia-loglevel 3 --address 0.0.0.0 --port 9022 --secret cymru
+    networks:
+      - jambonz-net
+
   feature-server:
     image: jambonz/feature-server:latest
     container_name: jambonz-feature-server
@@ -216,31 +224,42 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      drachtio:
-        condition: service_healthy
-    # Add delay to ensure drachtio is fully ready when sbc-pinger starts
-    entrypoint: [ "/bin/sh", "-c", "sleep 2 && exec npm start" ]
+      feature-server-drachtio:
+        condition: service_started
+      freeswitch:
+        condition: service_started
     environment:
+      # Node environment
+      NODE_ENV: production
+      HTTP_PORT: 3000
+      # MySQL configuration
       JAMBONES_MYSQL_HOST: mysql
       JAMBONES_MYSQL_USER: root
       JAMBONES_MYSQL_PASSWORD: admin
       JAMBONES_MYSQL_DATABASE: jambones
+      # Redis configuration
       JAMBONES_REDIS_HOST: redis
-      DRACHTIO_HOST: drachtio
+      JAMBONES_REDIS_PORT: 6379
+      # Drachtio configuration
+      DRACHTIO_HOST: feature-server-drachtio
       DRACHTIO_PORT: 9022
       DRACHTIO_SECRET: cymru
-      ENABLE_CDRS: 0
-      JAMBONES_LOGLEVEL: debug
+      # FreeSWITCH configuration
+      JAMBONES_FREESWITCH: freeswitch:8021:JambonzR0ck$
+      # Network configuration
+      JAMBONES_NETWORK_CIDR: 172.18.0.0/16
+      # Security and encryption
       JWT_SECRET: whosyourdaddy
       ENCRYPTION_SECRET: whosyourdaddy
+      # Logging and monitoring
+      JAMBONES_LOGLEVEL: debug
       JAMBONES_TIME_SERIES_HOST: influxdb
-      JAMBONES_FREESWITCH: freeswitch:8021:JambonzR0ck$
-      JAMBONES_NETWORK_CIDR: 172.18.0.0/16
-      JAMBONES_SUBNET: 172.18.0.0/16
-      # Feature server registers its service URL in Redis
-      HTTP_PORT: 3000
-      # List of SBC addresses for feature-server to ping and register with
+      # CDRs configuration
+      ENABLE_CDRS: 0
+      # SBC configuration
       JAMBONES_SBCS: drachtio
+    ports:
+      - "3100:3000"
     networks:
       - jambonz-net
 
