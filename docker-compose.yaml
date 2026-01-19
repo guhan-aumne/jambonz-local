@@ -173,6 +173,7 @@ services:
       JAMBONES_TIME_SERIES_HOST: influxdb
       JAMBONES_NETWORK_CIDR: 172.18.0.0/16
       JWT_SECRET: whosyourdaddy
+      ENCRYPTION_SECRET: whosyourdaddy
     networks:
       - jambonz-net
 
@@ -251,6 +252,8 @@ services:
       # Security and encryption
       JWT_SECRET: whosyourdaddy
       ENCRYPTION_SECRET: whosyourdaddy
+      # Google Cloud credentials
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/credentials/gcp.json
       # Logging and monitoring
       JAMBONES_LOGLEVEL: debug
       JAMBONES_TIME_SERIES_HOST: influxdb
@@ -258,6 +261,8 @@ services:
       ENABLE_CDRS: 0
       # SBC configuration
       JAMBONES_SBCS: drachtio
+    volumes:
+      - ./aumne-act-ccaas-internal-e79b1e3e9988.json:/opt/credentials/gcp.json
     ports:
       - "3100:3000"
     networks:
@@ -281,6 +286,7 @@ services:
       JAMBONES_LOGLEVEL: info
       HTTP_PORT: 3000
       JWT_SECRET: whosyourdaddy
+      ENCRYPTION_SECRET: whosyourdaddy
       JAMBONES_TIME_SERIES_HOST: influxdb
     ports:
       - "3000:3000"

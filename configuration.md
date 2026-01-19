@@ -1,102 +1,217 @@
 # Jambonz Local PoC - Configuration & Setup Documentation
 
-This document serves as a comprehensive Proof of Concept (PoC) reference for deploying jambonz locally using Docker Compose. It documents the UI-created configuration, explains how system components integrate, and captures all setup challenges encountered and resolved during deployment.
+This document serves as a comprehensive Proof of Concept (PoC) reference for deploying Jambonz locally using Docker Compose. It documents the UI-created configuration, explains how system components integrate, and captures all setup challenges encountered and resolved during deployment.
+
+---
+
+## Table of Contents
+
+1. [Repository Overview](#repository-overview)
+2. [System Architecture](#system-architecture)
+3. [Prerequisites](#prerequisites)
+4. [Installation & Setup](#installation--setup)
+5. [Component Configuration](#component-configuration)
+6. [Testing Your Deployment](#testing-your-deployment)
+7. [Troubleshooting & Common Issues](#troubleshooting--common-issues)
+8. [Detailed Issue Resolutions](#detailed-issue-resolutions)
+9. [Debugging Reference](#debugging-reference)
+10. [Webhook Development Issues](#webhook-development-issues)
+11. [File Reference](#file-reference)
 
 ---
 
 ## Repository Overview
 
 **What this repository provides:**  
-A complete local deployment of [jambonz](https://www.jambonz.org/), an open-source CPaaS (Communications Platform as a Service) that enables programmable voice and messaging applications via webhooks and JSON-based call control.
+A complete local deployment of [Jambonz](https://www.jambonz.org/), an open-source CPaaS (Communications Platform as a Service) that enables programmable voice and messaging applications via webhooks and JSON-based call control.
 
 **PoC Scope:**  
-- Full jambonz microservices stack (12 containers) running via Docker Compose
+- Full Jambonz microservices stack (**13 containers**) running via Docker Compose
 - Pre-seeded MySQL database with default service provider, account, applications, and SIP users
-- SIP client registration (MicroSIP) calling a cloud-hosted "hello world" application
-- Inbound call routing from local SIP clients to jambonz applications
+- SIP client registration (MicroSIP) with interactive speech recognition demos
+- Inbound call routing from local SIP clients to Jambonz applications
+- Custom webhook development with TTS and STT capabilities
 
 ---
 
 ## System Architecture
 
+### Architecture Diagram
+
+```mermaid
+graph TB
+    subgraph External["External Network"]
+        PSTN["PSTN/Carrier"]
+        SIP_CLIENTS["SIP Clients<br/>(MicroSIP)"]
+    end
+    
+    subgraph SBC["SBC Layer"]
+        RTPENGINE["rtpengine:22222"]
+        SBC_SIDECAR["sbc-sip-sidecar"]
+        SBC_INBOUND["sbc-inbound:4000"]
+        SBC_ROUTER["sbc-call-router"]
+        SBC_OUTBOUND["sbc-outbound:4001"]
+    end
+    
+    subgraph FS["Feature Server Layer"]
+        DRACHTIO_FS["drachtio-feature:9023"]
+        FEATURE_SERVER["feature-server:3000"]
+        FREESWITCH["FreeSWITCH:8021"]
+    end
+    
+    subgraph APP["Application Layer"]
+        API_SERVER["api-server:3000"]
+        WEBAPP["webapp:3001"]
+        WEBHOOK["webhook:3002"]
+    end
+    
+    subgraph DATA["Data Layer"]
+        MYSQL["MySQL"]
+        REDIS["Redis"]
+        INFLUXDB["InfluxDB"]
+    end
+    
+    %% External connections
+    PSTN --> SBC_INBOUND
+    SIP_CLIENTS --> SBC_INBOUND
+    SIP_CLIENTS -.-> SBC_SIDECAR
+    
+    %% SBC Layer connections
+    SBC_INBOUND --> RTPENGINE
+    SBC_INBOUND --> SBC_ROUTER
+    SBC_ROUTER --> SBC_OUTBOUND
+    SBC_ROUTER --> FEATURE_SERVER
+    SBC_OUTBOUND --> RTPENGINE
+    
+    %% Feature Server connections
+    DRACHTIO_FS --> FEATURE_SERVER
+    FEATURE_SERVER --> FREESWITCH
+    FEATURE_SERVER --> WEBHOOK
+    
+    %% Application Layer connections
+    FEATURE_SERVER --> API_SERVER
+    WEBAPP --> API_SERVER
+    
+    %% Data Layer connections
+    FEATURE_SERVER --> MYSQL
+    FEATURE_SERVER --> REDIS
+    FEATURE_SERVER --> INFLUXDB
+    API_SERVER --> MYSQL
+    API_SERVER --> REDIS
+    SBC_INBOUND --> MYSQL
+    SBC_INBOUND --> REDIS
+    
+    style External fill:#1a1a2e
+    style SBC fill:#16213e
+    style FS fill:#0f3460
+    style APP fill:#533483
+    style DATA fill:#9b59b6
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        Docker Compose Stack                             │
-├─────────────┬─────────────┬─────────────┬─────────────┬─────────────────┤
-│   MySQL     │   Redis     │  InfluxDB   │  FreeSWITCH │   RTPEngine     │
-│  (jambones) │   (cache)   │ (metrics)   │   (media)   │    (RTP)        │
-├─────────────┴─────────────┴─────────────┴─────────────┴─────────────────┤
-│                                                                         │
-│  ┌──────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐ │
-│  │drachtio  │  │ sbc-inbound  │  │ sbc-outbound │  │  sbc-call-router │ │
-│  │ (SIP)    │  │              │  │              │  │                  │ │
-│  └────┬─────┘  └──────────────┘  └──────────────┘  └──────────────────┘ │
-│       │                                                                 │
-│  ┌────┴────────────────┐  ┌───────────────────┐  ┌────────────────────┐ │
-│  │ sbc-sip-sidecar     │  │  feature-server   │  │    api-server      │ │
-│  │ (SIP registration)  │  │  (call handling)  │  │    (REST API)      │ │
-│  └─────────────────────┘  └───────────────────┘  └────────────────────┘ │
-│                                                                         │
-│  ┌────────────────────────────────────────────────────────────────────┐ │
-│  │                         webapp (UI)                                │ │
-│  └────────────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────────────┘
-         │                                          │
-         │ SIP (UDP/TCP 5060)                       │ HTTP (:3001 UI, :3000 API)
-         ▼                                          ▼
-    ┌────────────┐                              ┌──────────┐
-    │ MicroSIP   │                              │ Browser  │
-    │(Softphone) │                              │          │
-    └────────────┘                              └──────────┘
-```
 
----
+### Service Overview
 
-## How Components Work Together
-
-### 1. Docker Compose (`docker-compose.yaml`)
-
-Orchestrates 12 microservices required for a complete jambonz deployment:
+**13 Microservices orchestrated by Docker Compose:**
 
 | Service | Purpose | Ports Exposed |
 |---------|---------|---------------|
 | `mysql` | Persistent database (schema + seed data) | - |
 | `redis` | Session state & caching | - |
 | `influxdb` | Time-series metrics | - |
-| `drachtio` | SIP server (entry point for SIP traffic) | **5060/udp, 5060/tcp**, 9022 |
+| `drachtio` | Main SIP server (SBC entry point) | **5060/udp, 5060/tcp**, 9022 |
+| `feature-server-drachtio` | Dedicated SIP server for feature server | - |
 | `freeswitch` | Media server (TTS, recording, conferencing) | 8021, 30000-30100/udp |
 | `rtpengine` | RTP proxy for media relay | 22222/udp, 40000-40100/udp |
 | `sbc-inbound` | Handles inbound SIP calls | - |
 | `sbc-outbound` | Handles outbound SIP calls | - |
 | `sbc-call-router` | Routes calls to feature servers | - |
 | `sbc-sip-sidecar` | SIP device registration | - |
-| `feature-server` | Executes jambonz applications | - |
+| `feature-server` | Executes Jambonz applications | 3100 |
 | `api-server` | REST API for management | **3000** |
 | `webapp` | Admin UI | **3001** |
+| `webhook` | Custom webhook application (optional) | **3002** |
 
-### 2. Database Seed Script (`init-db.sql`)
+---
 
-The `init-db.sql` file is mounted into MySQL and executed on first container start. It contains:
+## Prerequisites
 
-- **Complete jambonz schema** (cloned from `jambonz-api-server/db/jambones-sql.sql`)
-- **Pre-configured seed data:**
-  - Service provider: `default service provider`
-  - Account: `default account`
-  - Applications: `hello world`, `dial time`
-  - Webhooks pointing to `https://public-apps.jambonz.cloud/`
-  - Admin user: `joe@foo.bar` / password: `admin`
-  - API keys for programmatic access
-  - Predefined carriers (Twilio, Voxbone, Simwood, TelecomsXChange)
+### System Requirements
 
-### 3. Drachtio Configuration (`drachtio.conf.xml`)
+- **Operating System**: Windows 10/11, Linux, or macOS
+- **RAM**: Minimum 8GB (16GB recommended)
+- **Disk Space**: 10GB free space
+- **Network**: Local network with static or known IP address
 
-The drachtio SIP server configuration specifies:
+### Required Software
+
+1. **Docker Desktop** (Windows/macOS) or **Docker Engine** (Linux)
+   - Version 20.10 or higher
+   - Docker Compose V2 included
+
+2. **Git** (for cloning repositories)
+
+3. **SIP Softphone** (for testing)
+   - Recommended: [MicroSIP](https://www.microsip.org/) (Windows)
+   - Alternatives: Linphone, Zoiper, or any standards-compliant SIP client
+
+### Network Configuration
+
+You'll need to know your computer's **LAN IP address**:
+
+**Windows:**
+```powershell
+ipconfig
+# Look for "IPv4 Address" under your active network adapter
+# Example: 192.168.1.45
+```
+
+**Linux/macOS:**
+```bash
+ip addr show
+# or
+ifconfig
+# Look for inet address on your primary interface
+```
+
+---
+
+## Installation & Setup
+
+### Step 1: Obtain Your LAN IP Address
+
+Before starting, identify your machine's LAN IP (you'll need this for configuration):
+
+```powershell
+# Windows
+ipconfig | findstr IPv4
+
+# Expected output example:
+#   IPv4 Address. . . . . . . . . . . : 192.168.1.45
+```
+
+**Note this IP address** - you'll use it in Step 4.
+
+---
+
+### Step 2: Clone the Repository
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/jambonz-local-poc
+cd jambonz-local-poc
+```
+
+---
+
+### Step 3: Configure Drachtio SIP Server
+
+Edit `drachtio.conf.xml` and update the `external-ip` with your LAN IP from Step 1:
 
 ```xml
 <drachtio>
     <admin port="9022" secret="cymru">0.0.0.0</admin>
     <sip>
         <contacts>
+            <!-- REPLACE 192.168.1.45 with YOUR LAN IP -->
             <contact external-ip="192.168.1.45" local-net="172.18.0.0/16">
                 sip:*:5060;transport=udp,tcp
             </contact>
@@ -109,32 +224,180 @@ The drachtio SIP server configuration specifies:
 </drachtio>
 ```
 
-**Key settings:**
-- `external-ip`: Your host machine's LAN IP (SIP clients connect here)
-- `local-net`: Docker network CIDR (for NAT traversal)
-- `port 9022`: Admin port for jambonz microservices to connect
+**Why this matters:** Drachtio needs to know your external IP for proper SIP header rewriting and NAT traversal.
 
 ---
 
-## UI Configuration Reference
+### Step 4: (Windows Only) Configure Firewall
 
-The following configurations were created via the jambonz web UI (http://localhost:3001) and are pre-seeded in the database:
+Allow SIP and RTP traffic through Windows Firewall:
 
-### Account Configuration
+```powershell
+# Open PowerShell as Administrator and run:
+
+# Allow SIP signaling
+New-NetFirewallRule -DisplayName "Jambonz SIP UDP" -Direction Inbound -Protocol UDP -LocalPort 5060 -Action Allow
+New-NetFirewallRule -DisplayName "Jambonz SIP TCP" -Direction Inbound -Protocol TCP -LocalPort 5060 -Action Allow
+
+# Allow RTP media
+New-NetFirewallRule -DisplayName "Jambonz FreeSWITCH RTP" -Direction Inbound -Protocol UDP -LocalPort 30000-30100 -Action Allow
+New-NetFirewallRule -DisplayName "Jambonz RTPEngine RTP" -Direction Inbound -Protocol UDP -LocalPort 40000-40100 -Action Allow
+```
+
+---
+
+### Step 5: Start Jambonz Stack
+
+```bash
+# Pull latest images and start all services
+docker-compose up -d
+
+# Verify all containers are running
+docker-compose ps
+
+# You should see 13 containers with STATUS "Up"
+```
+
+**Initial startup** takes 2-3 minutes. Services start in dependency order:
+1. MySQL, Redis, InfluxDB (data layer)
+2. Drachtio, FreeSWITCH, RTPEngine (media layer)
+3. SBC components, Feature Server
+4. API Server, WebApp
+
+---
+
+### Step 6: Verify Database Initialization
+
+Check that the database was seeded correctly:
+
+```bash
+# Check MySQL initialization logs
+docker logs jambonz-mysql | grep "ready for connections"
+
+# Should show the server is ready
+```
+
+---
+
+### Step 7: Access Web UI
+
+1. Open browser: **http://localhost:3001**
+2. Login with default credentials:
+   - **Email**: `joe@foo.bar`
+   - **Password**: `admin`
+3. You'll be prompted to change the password on first login
+
+---
+
+### Step 8: Configure Google Cloud Credentials (For STT)
+
+For speech recognition to work, mount your Google Cloud service account JSON:
+
+1. Place your GCP credentials file in the repository root
+2. The `docker-compose.yaml` already mounts it:
+   ```yaml
+   feature-server:
+     volumes:
+       - ./aumne-act-ccaas-internal-e79b1e3e9988.json:/opt/credentials/gcp.json
+     environment:
+       GOOGLE_APPLICATION_CREDENTIALS: /opt/credentials/gcp.json
+   ```
+
+---
+
+### Step 9: Configure MicroSIP Client
+
+1. **Download and install** MicroSIP
+2. **Add new account** with these settings:
+
+| Setting | Value |
+|---------|-------|
+| Account Name | Jambonz |
+| SIP Server | `sip.jambonz.local` |
+| SIP Proxy | `YOUR_LAN_IP` (from Step 1) |
+| Username | `1001` |
+| Login | `1001` |
+| Password | `password` |
+| Domain | `sip.jambonz.local` |
+| Transport | UDP |
+
+3. **Save and Enable** the account
+4. Wait for **green status** (Registered)
+
+---
+
+### Step 10: Make Your First Test Call
+
+1. In MicroSIP, dial **any number** (e.g., `1002`, `9999`, `5551234`)
+2. You should hear: *"Hello! Welcome to the Jambonz interactive demo."*
+3. Speak your name when prompted
+4. The system will repeat it back to you
+5. Call disconnects automatically
+
+**If you hear the greeting** - Congratulations! 🎉 Your Jambonz deployment is working!
+
+---
+
+## Testing Your Deployment
+
+### Verification Checklist
+
+✅ **All containers running:**
+```bash
+docker-compose ps
+# All 13 services should show "Up"
+```
+
+✅ **Feature Server connected:**
+```Bash
+docker logs jambonz-feature-server | grep "connected to drachtio"
+# Should show connection to feature-server-drachtio (sidecar)
+```
+
+✅ **SIP registration successful:**
+- MicroSIP shows green status
+- Can make calls
+
+✅ **Speech recognition working:**
+- Webhook captures and repeats your speech
+- Check logs: `docker logs jambonz-webhook --tail 50`
+
+---
+
+## Component Configuration
+
+### Database Seed Script (`init-db.sql`)
+
+The `init-db.sql` file is mounted into MySQL and executed on first container start. It contains:
+
+- **Complete Jambonz schema** (cloned from `jambonz-api-server/db/jambones-sql.sql`)
+- **Pre-configured seed data:**
+  - Service provider: `default service provider`
+  - Account: `default account`
+  - Applications: `local-webhook`, `dial time`
+  - Webhooks pointing to `https://public-apps.jambonz.cloud/` or local webhook
+  - Admin user: `joe@foo.bar` / password: `admin`
+  - API keys for programmatic access
+  - Predefined carriers (Twilio, Voxbone, Simwood, TelecomsXChange)
+
+### UI Configuration Reference
+
+The following configurations were created via the Jambonz web UI and are pre-seeded in the database:
+
+#### Account Configuration
 
 ```yaml
 account:
-  sid: 9351f46a-678c-43f5-b8a6-d4eb58d131af
   name: default account
   max_calls: 0              # 0 = unlimited
   sip_realm: sip.jambonz.local
   webhook_secret: wh_secret_cJqgtMDPzDhhnjmaJH6Mtk
   sip_application:
-    name: hello world
+    name: local-webhook
     purpose: inbound SIP device calls
 ```
 
-### System Settings
+#### System Settings
 
 ```yaml
 system:
@@ -146,7 +409,7 @@ system:
   admin_type: service_provider
 ```
 
-### SIP Users (Clients)
+#### SIP Users (Clients)
 
 ```yaml
 sip_users:
@@ -158,35 +421,74 @@ sip_users:
 
 > SIP registration domain: `sip:sip.jambonz.local`
 
-### Application Configuration
+#### Application Configuration
 
 ```yaml
 application:
-  sid: 7087fe50-8acb-4f3b-b820-97b573723aab
-  name: hello world
+  name: local-webhook
   account: default account
 
   calling_webhook:
-    url: https://public-apps.jambonz.cloud/hello-world
+    url: http://webhook:3002/call
     method: POST
     auth: none
 
   call_status_webhook:
-    url: https://public-apps.jambonz.cloud/call-status
+    url: http://webhook:3002/call-status
     method: POST
     auth: none
 
+
   speech_synthesis:
-    vendor: google
+    vendor: elevenlabs  # or google
     language: en-US
-    voice: Wavenet-C
 
   speech_recognition:
     vendor: google
     language: en-US
 ```
 
-### Carrier Configuration (Inbound SIP Gateway)
+#### Speech Services Configuration (UI)
+
+Jambonz requires speech services to be configured for TTS (Text-to-Speech) and STT (Speech-to-Text). Configure these in the web UI under **Settings → Speech**.
+
+##### Google Cloud Speech (STT Only)
+
+**Navigation:** Settings → Speech → Add Speech Service → Google
+
+**Configuration Fields:**
+
+| Field | Value | Description |
+|-------|-------|-------------|
+| Credential Status | `online ok` | Your Google Cloud service account credential name |
+| Vendor | Google | Automatically selected |
+| Account | *(optional)* | Leave blank for global use |
+| Label | *(optional)* | Friendly name for this credential |
+| Use for TTS | ❌ Unchecked | Disable Google for text-to-speech  (optional)|
+| Use for STT | ✅ Checked | Enable Google for speech-to-text |
+
+**Service Account JSON:**
+Paste your complete Google Cloud service account JSON
+
+---
+
+##### ElevenLabs (TTS Only)
+
+**Navigation:** Settings → Speech → Add Speech Service → ElevenLabs
+
+**Configuration Fields:**
+
+| Field | Value | Description |
+|-------|-------|-------------|
+| Use for TTS | ✅ Checked | Enable ElevenLabs for text-to-speech |
+| Data Residency | `US` | Server region for data processing |
+| API Key | `sk_***********` | Your ElevenLabs API key (hidden) |
+| Model | `Eleven Turbo v2` | Voice model selection |
+| Enable Optimize | ✅ Checked | Enable latency optimization |
+
+---
+
+#### Carrier Configuration (Inbound SIP Gateway) [Optional]
 
 ```yaml
 carrier:
@@ -207,283 +509,154 @@ carrier:
 
 ---
 
-## MicroSIP Softphone Configuration
+## Troubleshooting & Common Issues
 
-```yaml
-Account Name: Jambonz
-SIP Server: sip.jambonz.local
-SIP Proxy: 192.168.1.45    # Host machine LAN IP
+### Issue: MicroSIP Won't Register
 
-Username: 1001
-Login: 1001
-Password: password
+**Symptoms**: Registration status stays red or shows "Forbidden"
 
-Domain: sip.jambonz.local
-Transport: UDP
-
-# Full SIP URI for registration:
-sip_uri: sip:1001@sip.jambonz.local
-```
-
-> **Important:** Both `SIP Server` (domain) AND `SIP Proxy` (IP) must be configured for successful registration when the domain is not DNS-resolvable.
+**Solutions**:
+1. ✅ Verify `drachtio.conf.xml` has your correct LAN IP
+2. ✅ Check firewall allows port 5060 UDP/TCP
+3. ✅ Ensure both "SIP Server" AND "SIP Proxy" are configured in MicroSIP
+4. ✅ Restart Drachtio: `docker-compose restart drachtio`
 
 ---
 
-## Setup Challenges & Resolutions
+### Issue: Call Rejected (404/403)
 
-This section documents all issues encountered during the local deployment setup and how each was resolved.
+**Symptoms**: Call fails with "Not Found" or "Forbidden"
 
-### 1. Initial Minimal Setup Failure
+**Cause**: SBC can't find account because MicroSIP is sending IP instead of domain
 
-**Problem:** Attempted to run jambonz with only essential containers (mysql, redis, drachtio, api-server, webapp). SIP registration and call handling failed.
+**Solutions**:
+1. **Preferred**: Set "Domain" field in MicroSIP to `sip.jambonz.local`
+2. **Alternative**: Append Account SID to URI:
+   ```
+   sip:1002@192.168.1.45?X-Account-Sid=9351f46a-678c-43f5-b8a6-d4eb58d131af
+   ```
 
-**Resolution:** Jambonz requires the complete "mini" microservices stack. All 12 services are interdependent:
+---
+
+### Issue: No Audio / One-Way Audio
+
+**Symptoms**: Call connects but no sound
+
+**Solutions**:
+1. Open RTP ports in firewall (see Step 4)
+2. Verify RTPEngine is running: `docker logs jambonz-rtpengine`
+3. Check `external-ip` in drachtio.conf.xml matches your LAN IP
+
+---
+
+### Issue: Webhook Not Receiving Calls
+
+**Symptoms**: Call hangs or errors instead of triggering webhook
+
+**Solutions**:
+1. Enable CORS in webhook:
+   ```python
+   from flask_cors import CORS
+   CORS(app)
+   ```
+2. Check webhook logs: `docker logs jambonz-webhook -f`
+3. Verify application configuration points to correct webhook URL
+
+---
+
+### Issue: "Old Code Running" in Webhook
+
+**Symptoms**: Code changes not reflected in running webhook
+
+**Solution**:
+```bash
+# Rebuild webhook Docker image
+docker-compose build webhook
+
+# Restart with new image
+docker-compose up -d webhook
+```
+
+See [Section 10](#webhook-development-issues) for detailed webhook troubleshooting.
+
+---
+
+## Detailed Issue Resolutions
+
+### Issue 1: Initial Minimal Setup Failure
+
+**Problem:** Attempted to run Jambonz with only essential containers. SIP registration and call handling failed.
+
+**Resolution:** Jambonz requires the complete microservices stack. All 13 services are interdependent:
 - `sbc-sip-sidecar` handles SIP REGISTER requests
 - `sbc-inbound` / `sbc-outbound` handle call routing  
 - `sbc-call-router` routes to `feature-server`
 - `feature-server` executes application logic
+- `feature-server-drachtio` provides dedicated SIP server
 
 **Lesson:** Do not attempt to reduce the container count—each microservice has a specific responsibility.
 
 ---
 
-### 2. Proper Database Seeding
+### Issue 2: Proper Database Seeding
 
 **Problem:** Empty database caused UI to fail loading, and manually created configurations lacked proper foreign key relationships.
 
-**Resolution:** Cloned the complete schema from `jambonz-api-server/db/jambones-sql.sql` and merged it with seed data from `seed-production-database-open-source.sql`. The combined `init-db.sql` creates:
-- All required tables with proper indexes and foreign keys
-- Default service provider and account
-- Pre-configured applications with webhook references
-- Admin user with proper permissions
+**Resolution:** Cloned the complete schema from `jambonz-api-server/db/jambones-sql.sql` and merged it with seed data. The combined `init-db.sql` creates all required tables with proper indexes, foreign keys, and default configurations.
 
-**Lesson:** Use the official jambonz-api-server schema as source of truth for database structure.
+**Lesson:** Use the official Jambonz-api-server schema as source of truth for database structure.
 
 ---
 
-### 3. Why Direct SQL Injection Was Avoided
+### Issue 3: Port Exposure and Drachtio Entry Point
 
-**Problem:** Considered inserting SIP users and carriers directly via SQL.
+**Problem:** SIP clients could not reach Jambonz from the host network.
 
-**Resolution:** This approach was avoided because:
-- UI-created configurations establish proper foreign key relationships
-- Some records require associated webhook entries in separate tables
-- Password hashing and encryption secrets are handled by the API
-- The UI generates proper UUIDs and validates referential integrity
-
-**Lesson:** Use the jambonz UI or REST API for configuration—not raw SQL—to ensure data integrity.
-
----
-
-### 4. Port Exposure and Drachtio Entry Point
-
-**Problem:** SIP clients could not reach jambonz from the host network.
-
-**Resolution:** Drachtio is the **only SIP entry point** and must expose:
-- `5060/udp` - Primary SIP signaling (most softphones use UDP)
-- `5060/tcp` - Alternative SIP transport
-- `9022` - Admin port for internal microservice connections
-
-Docker Compose port mapping:
-```yaml
-ports:
-  - "5060:5060/udp"
-  - "5060:5060/tcp"
-  - "9022:9022"
-```
+**Resolution:** Drachtio is the **only SIP entry point** and must expose ports 5060/udp, 5060/tcp, and 9022.
 
 **Lesson:** Drachtio handles all external SIP traffic—no other containers need SIP ports exposed.
 
 ---
 
-### 5. Windows Firewall Permissions
+### Issue 4: Windows Firewall Permissions
 
 **Problem:** SIP traffic blocked by Windows Firewall even with correct port exposure.
 
-**Resolution:** Create inbound firewall rules:
-```powershell
-# Allow SIP signaling
-New-NetFirewallRule -DisplayName "Jambonz SIP UDP" -Direction Inbound -Protocol UDP -LocalPort 5060 -Action Allow
-New-NetFirewallRule -DisplayName "Jambonz SIP TCP" -Direction Inbound -Protocol TCP -LocalPort 5060 -Action Allow
-
-# Allow RTP media (if needed for audio)
-New-NetFirewallRule -DisplayName "Jambonz RTP" -Direction Inbound -Protocol UDP -LocalPort 30000-30100 -Action Allow
-```
+**Resolution:** Create explicit inbound firewall rules (see Step 4 in Installation).
 
 **Lesson:** Windows firewall operates independently of Docker port mapping.
 
 ---
 
-### 6. Drachtio Configuration XML Updates
+### Issue 5: Drachtio External IP Configuration
 
-**Problem:** After modifying `drachtio.conf.xml`, changes were not taking effect.
+**Problem:** SIP clients received responses with internal Docker IPs, causing registration failures.
 
-**Resolution:** Drachtio does not hot-reload configuration. After any XML changes:
-```bash
-docker-compose restart drachtio
-```
+**Resolution:** Set `external-ip="YOUR_LAN_IP"` in drachtio.conf.xml to enable proper NAT traversal.
 
-Additionally, ensure the XML syntax is valid—drachtio may fail silently with malformed config. Key configuration points:
-- `external-ip` must match your host's LAN IP
-- `local-net` must match Docker's network CIDR (172.18.0.0/16)
-- Admin `secret` must match `DRACHTIO_SECRET` in other containers
-
-**Lesson:** Always restart drachtio after config changes and verify syntax.
+**Lesson:** Update external-ip whenever the host's IP changes.
 
 ---
 
-### 7. Drachtio External IP Configuration
+### Issue 6: MicroSIP Domain + Proxy Configuration
 
-**Problem:** SIP clients received responses with internal Docker IPs, causing one-way audio or registration failures.
+**Problem:** MicroSIP failed to register when only SIP Server was set.
 
-**Resolution:** The `external-ip` attribute in drachtio.conf.xml must be set to your host machine's **actual LAN IP address**:
-```xml
-<contact external-ip="192.168.1.45" local-net="172.18.0.0/16">
-```
-
-This enables drachtio to rewrite SIP headers with the correct external address for NAT traversal.
-
-**Lesson:** Update `external-ip` whenever the host's IP changes.
-
----
-
-### 8. MicroSIP Domain + Proxy Configuration
-
-**Problem:** MicroSIP failed to register when only `SIP Server` was set to the domain name.
-
-**Resolution:** MicroSIP (and similar softphones) require **both**:
-- `SIP Server` / `Domain`: `sip.jambonz.local` (used in SIP headers)
+**Resolution:** Configure BOTH:
+- `SIP Server`: `sip.jambonz.local` (used in SIP headers)
 - `SIP Proxy`: `192.168.1.45` (actual IP to send packets to)
 
-Since `sip.jambonz.local` is not DNS-resolvable, the proxy field provides the IP routing while the domain maintains proper SIP addressing.
-
-**Lesson:** For non-DNS-resolvable domains, configure both domain name and proxy IP in softphone settings.
+**Lesson:** For non-DNS-resolvable domains, configure both domain name and proxy IP.
 
 ---
 
-## Quick Start
+### Issue 7: Feature Server Routing Loop
 
-1. **Clone and navigate:**
-   ```bash
-   cd jambonz
-   ```
+**Problem:** Calls failed with "603 Decline" and "no outbound carriers found" error. Webhook was never invoked.
 
-2. **Update drachtio.conf.xml with your LAN IP:**
-   ```xml
-   <contact external-ip="YOUR_LAN_IP" local-net="172.18.0.0/16">
-   ```
+**Root Cause:** Sharing a single Drachtio instance between SBCs and Feature Server created a routing loop.
 
-3. **Start the stack:**
-   ```bash
-   docker-compose up -d
-   ```
-
-4. **Access the UI:**
-   - Web UI: http://localhost:3001
-   - Default login: `joe@foo.bar` / `admin`
-
-5. **Configure MicroSIP:**
-   - SIP Server: `sip.jambonz.local`
-   - SIP Proxy: `YOUR_LAN_IP`
-   - Username: `1001` / Password: `password`
-
-6. **Make a test call:**
-   - Dial any number from MicroSIP
-   - Hear the "hello world" greeting from the cloud application
-
----
-
-## File Manifest
-
-| File | Purpose |
-|------|---------|
-| `docker-compose.yaml` | Complete microservices orchestration (12 services) |
-| `init-db.sql` | Combined schema + seed data (from jambonz-api-server) |
-| `drachtio.conf.xml` | Drachtio SIP server configuration |
-| `configuration.md` | This documentation file |
-| `jambonz-api-server/` | Cloned for schema reference |
-| `freeswitch/` | FreeSWITCH log volume mount |
-
----
-
-## Troubleshooting & Common Issues
-
-### ❌ Issue: Call Rejected (404/403) - Account Not Found
-**Symptoms**: SBC rejects calls with "Account not found" or "Forbidden".
-**Cause**: The SBC looks up the account using the SIP Realm (`sip.jambonz.local`). If MicroSIP sends the IP as the domain, lookup fails.
-**Solutions**:
-1.  **Preferred**: Configure "Domain" in MicroSIP to `sip.jambonz.local`.
-2.  **Alternative**: Append the Account SID to the URI explicitly:
-    `sip:1002@192.168.1.45?X-Account-Sid=<YOUR_ACCOUNT_SID>`
-
-### ❌ Issue: Webhook Interaction Failed (CORS)
-**Symptoms**: Feature server logs an error contacting the webhook, or call hangs.
-**Cause**: Jambonz feature server sends an HTTP `OPTIONS` request (Preflight) before `POST`. Standard Flask/Node apps may reject this.
-**Solution**: Enable CORS support in your webhook application.
-*   **Python (Flask)**: Use `flask_cors`.
-    ```python
-    from flask_cors import CORS
-    app = Flask(__name__)
-    CORS(app)
-    ```
-
-### ❌ Issue: Feature Server Bypasses Webhook (Direct Calling)
-**Symptoms**: Calling another registered user (e.g., 1001 -> 1002) rings the device directly instead of triggering your application logic.
-**Cause**: The `clients` table has `allow_direct_user_calling=1` by default.
-**Solution**: Disable direct calling flags for the user to force application logic.
-```sql
-UPDATE clients SET allow_direct_user_calling=0, allow_direct_queue_calling=0, allow_direct_app_calling=0 WHERE username='1001';
-```
-
-### ❌ Issue: Missing Application SID
-**Symptoms**: Call reaches Feature Server but errors out trying to find an application.
-**Cause**: The Account has no `device_calling_application_sid` configured.
-**Solution**: Link an Application to the Account in the database.
-```sql
-UPDATE accounts SET device_calling_application_sid='<APP_SID>' WHERE name='default account';
-```
-
-### ❌ Issue: Silence / One-way Audio
-**Symptoms**: Call connects but no audio.
-2.  Open UDP ports `40000-40100` (RTPEngine) and `30000-30100` (FreeSWITCH) in Windows Firewall.
-
----
-
-### 9. Feature Server Routing Loop - Shared Drachtio Architecture Issue
-
-**Problem:** Calls with `X-Jambonz-Routing: app` header were failing with `603 Decline` and "no outbound carriers found" error. The webhook application was never invoked despite being configured correctly.
-
-**Symptoms:**
-- Call from User 1001 to User 1002 fails immediately
-- Logs show `sbc-inbound` correctly routes to Feature Server
-- Feature Server does not invoke webhook
-- Call gets forwarded to `sbc-outbound` which rejects with `603 Decline`
-- Error: `no outbound carriers found for account_sid`
-
-**Root Cause Analysis:**
-
-The issue was a **routing loop** caused by sharing a single Drachtio instance between SBCs and the Feature Server:
-
-1. `sbc-inbound` identifies the Feature Server location as `172.18.0.6:5060` (the main shared Drachtio container)
-2. `sbc-inbound` forwards the INVITE to `172.18.0.6:5060`
-3. The main Drachtio receives the looped call back to itself
-4. Feature Server fails to intercept the looped call (source/destination conflict)
-5. Main Drachtio falls back to consulting `sbc-call-router` for routing
-6. `sbc-call-router` sees User 1002 as a SIP destination and routes to `sbc-outbound`
-7. `sbc-outbound` rejects because there are no configured outbound carriers
-
-**Key Log Evidence:**
-```
-sbc-inbound: "using feature server 172.18.0.6:5060"
-drachtio: INVITE sent to sip:172.18.0.6:5060
-drachtio: processMessageStatelessly (looped call, no feature-server match)
-sbc-call-router: {"action":"route","data":{"uri":"sbc-outbound:4001"}}
-sbc-outbound: "no outbound carriers found for account_sid"
-```
-
-**Resolution:**
-
-Implemented a **dedicated sidecar Drachtio instance** for the Feature Server:
+**Resolution:** Implemented dedicated `feature-server-drachtio` sidecar container.
 
 **Architecture Change:**
 ```diff
@@ -500,99 +673,50 @@ After (Sidecar Pattern):
   └──────────┘           └─────────────────────┘
 ```
 
-**Implementation in `docker-compose.yaml`:**
-
-1. **Added new service `feature-server-drachtio`:**
-```yaml
-feature-server-drachtio:
-  image: drachtio/drachtio-server:latest
-  container_name: jambonz-feature-server-drachtio
-  restart: always
-  command: drachtio --contact "sip:*;transport=udp" --loglevel debug --sofia-loglevel 3 --address 0.0.0.0 --port 9022 --secret cymru
-  networks:
-    - jambonz-net
-```
-
-2. **Updated `feature-server` configuration:**
-```yaml
-feature-server:
-  depends_on:
-    feature-server-drachtio:
-      condition: service_started
-  environment:
-    DRACHTIO_HOST: feature-server-drachtio  # Changed from 'drachtio'
-```
-
-**Verification:**
-```bash
-# Restart services
-docker-compose up -d
-
-# Verify Feature Server connected to sidecar
-docker logs jambonz-feature-server --tail 50 | grep "connected to drachtio"
-# Expected: "connected to drachtio listening on udp/172.18.0.10:5060"
-```
-
-**Post-Fix Behavior:**
-- `sbc-inbound` now routes to Feature Server's dedicated sidecar (not the shared Drachtio)
-- Feature Server successfully intercepts calls with `X-Jambonz-Routing: app`
-- Webhook is invoked correctly
-- Call completes successfully with TTS greeting
-
-**Lesson:** In Jambonz architecture, the Feature Server should always have its own dedicated Drachtio sidecar to isolate application logic routing from SBC routing. Sharing a Drachtio instance between SBCs and Feature Server creates routing conflicts and loops.
-
-**Related Jambonz Documentation:**
-- Feature Server requires dedicated Drachtio connection for outbound call control
-- SBCs use the main Drachtio for SIP proxy functionality
-- This separation is standard in production Jambonz deployments
+**Lesson:** Feature Server must have its own Drachtio sidecar to isolate application logic routing from SBC routing.
 
 ---
 
-## Debugging Tips
+## Debugging Reference
 
-### Viewing Logs for Call Flow Analysis
+### Viewing Logs
 
 ```bash
-# View all service logs in real-time
+# Real-time logs from all services
 docker-compose logs -f
 
-# Check specific service logs
+# Specific service logs
 docker logs jambonz-feature-server --tail 100
 docker logs jambonz-sbc-inbound --tail 100
-docker logs jambonz-sbc-outbound --tail 100
-docker logs jambonz-drachtio --tail 100
+docker logs jambonz-webhook --tail 50
 
 # Search for specific call-id
 docker-compose logs | grep "CALL_ID_HERE"
 
-# Check if Feature Server connected to Drachtio
+# Check Feature Server connection
 docker logs jambonz-feature-server | grep "connected to drachtio"
 ```
 
-### Common Header Issues
+### Common SIP Headers
 
 ```
 X-Jambonz-Routing: app     → Routes to Feature Server (webhook application)
-X-Jambonz-Routing: sip     → Routes as standard SIP call (peer-to-peer or carrier)
+X-Jambonz-Routing: sip     → Routes as standard SIP call (peer-to-peer)
 ```
 
-If `X-Jambonz-Routing` is `sip` when you expect `app`:
-- User-to-User calls default to `sip` routing if the destination is a registered user
-- To force application logic, either:
-  - Dial a non-user number (e.g., `9999`)
-  - Set `allow_direct_user_calling=0` in the `clients` table
-  - Configure a DID/Phone Number assigned to the application
+**Forcing Application Logic:**
+- Dial a non-user number (e.g., `9999`)
+- Set `allow_direct_user_calling=0` in `clients` table
+- Assign a DID to the application
 
----
+### Architecture Validation
 
-## Architecture Validation Checklist
-
-✅ **Verify Drachtio Sidecar for Feature Server:**
+✅ **Verify Drachtio Sidecar:**
 ```bash
 docker ps | grep drachtio
-# Should show TWO drachtio containers:
+# Should show TWO containers:
 # - jambonz-drachtio (main, for SBCs)
-# - jambonz-feature-server-drachtio (sidecar, for Feature Server)
+# - jambonz-feature-server-drachtio (sidecar)
 ```
 
 ✅ **Verify Feature Server Connection:**
@@ -601,28 +725,204 @@ docker logs jambonz-feature-server 2>&1 | grep "connected to drachtio"
 # Should connect to sidecar, NOT main drachtio
 ```
 
-✅ **Check Service Dependencies:**
+---
+
+## Webhook Development Issues
+
+This section documents issues encountered while developing custom webhook applications for interactive call flows with speech recognition.
+
+### Issue 10.1: Stale Docker Image Code
+
+**Problem:** Updated webhook code not executed. Container continued using old code.
+
+**Cause:** Webhook uses `build: ./webhook` in docker-compose.yaml. Image was built once and cached.
+
+**Resolution:**
 ```bash
-docker-compose config | grep -A 5 "feature-server:"
-# Should depend on feature-server-drachtio, not drachtio
+# Rebuild the webhook Docker image
+docker-compose build webhook
+
+# Restart with new image
+docker-compose up -d webhook
+
+# Verify new code loaded
+docker exec jambonz-webhook cat /app/app.py | head -20
+```
+
+**Development Tip:** Use volume mounts for hot-reloading:
+```yaml
+webhook:
+  build: ./webhook
+  volumes:
+    - ./webhook/app.py:/app/app.py  # Direct mount
 ```
 
 ---
 
-## Updated File Manifest
+### Issue 10.2: Speech Recognition Vendor Configuration
 
-| File | Purpose |
-|------|---------|
-| `docker-compose.yaml` | Complete microservices orchestration (13 services + sidecar) |
-| `init-db.sql` | Combined schema + seed data (from jambonz-api-server) |
-| `drachtio.conf.xml` | Main Drachtio SIP server configuration (for SBCs) |
-| `configuration.md` | This documentation file |
-| `jambonz-api-server/` | Cloned for schema reference |
-| `freeswitch/` | FreeSWITCH log volume mount |
-| `webhook/app.py` | Local webhook application (optional, for testing) |
+**Problem:** Connection went "orange" after first TTS, preventing speech recognition.
+
+**Cause:** Explicit Google STT vendor config requires valid credentials:
+```python
+"recognizer": {"vendor": "google", "language": "en-US"}
+```
+
+**Resolution:** Simplified to use system default:
+```python
+{
+    "verb": "gather",
+    "input": ["speech"],
+    "speechTimeout": 3  # Removed explicit vendor
+}
+```
+
+**Lesson:** Either configure credentials properly or omit `recognizer` to use system default.
 
 ---
 
-**Document Version:** 2.0  
+### Issue 10.3: Incorrect Transcript Parsing
+
+**Problem:** STT working but webhook said "didn't catch that."
+
+**Cause:** Wrong parsing path. Looking for `speech.transcript` but Jambonz returns:
+```json
+{
+  "speech": {
+    "alternatives": [
+      {"transcript": "hello I am Jambonz", "confidence": 0.77}
+    ]
+  }
+}
+```
+
+**Resolution:**
+```python
+# Correct parsing
+speech_result = result_data.get('speech', {})
+alternatives = speech_result.get('alternatives', [])
+transcript = alternatives[0].get('transcript', '').strip() if alternatives else ''
+```
+
+---
+
+### Issue 10.4: Call Not Disconnecting After TTS
+
+**Problem:** Call didn't auto-disconnect after final TTS. Users had to manually hang up.
+
+**Cause:** Race condition - `hangup` executed before TTS audio completed.
+
+**Resolution:** Add `pause` between `say` and `hangup`:
+```python
+return jsonify([
+    {"verb": "say", "text": f"You said: {transcript}. Goodbye!"},
+    {"verb": "pause", "length": 1},  # Ensure TTS completes
+    {"verb": "hangup"}
+])
+```
+
+**Recommended pause:** 0.5-1.5 seconds depending on audio length.
+
+---
+
+### Complete Working Webhook Example
+
+```python
+"""
+Interactive Jambonz Webhook Application
+Handles inbound calls with speech recognition.
+"""
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+CORS(app)
+
+@app.route('/call', methods=['POST'])
+def handle_call():
+    """Greet caller and prompt for speech input."""
+    call_data = request.get_json(force=True, silent=True) or {}
+    logger.info(f"Incoming call from: {call_data.get('from', 'unknown')}")
+    
+    return jsonify([
+        {"verb": "say", "text": "Hello! Welcome to the Jambonz interactive demo."},
+        {
+            "verb": "gather",
+            "input": ["speech"],
+            "actionHook": "/gather-result",
+            "timeout": 10,
+            "speechTimeout": 3,
+            "say": {"text": "Please tell me your name, and I will repeat it back."}
+        }
+    ])
+
+@app.route('/gather-result', methods=['POST'])
+def gather_result():
+    """Process speech recognition result and repeat back."""
+    result_data = request.get_json(force=True, silent=True) or {}
+    
+    # Extract transcript from alternatives array
+    speech_result = result_data.get('speech', {})
+    alternatives = speech_result.get('alternatives', [])
+    transcript = alternatives[0].get('transcript', '').strip() if alternatives else ''
+    
+    if not transcript:
+        return jsonify([
+            {"verb": "say", "text": "Sorry, I didn't catch that. Goodbye!"},
+            {"verb": "pause", "length": 1},
+            {"verb": "hangup"}
+        ])
+    
+    logger.info(f"Repeating back: {transcript}")
+    return jsonify([
+        {"verb": "say", "text": f"You said: {transcript}. Thank you for calling!"},
+        {"verb": "pause", "length": 1},
+        {"verb": "hangup"}
+    ])
+
+@app.route('/call-status', methods=['POST'])
+def call_status():
+    """Log call status updates."""
+    status = request.get_json(force=True, silent=True) or {}
+    logger.info(f"Call {status.get('call_sid')} status: {status.get('call_status')}")
+    return '', 200
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=3002, debug=True)
+```
+
+### Webhook Troubleshooting Quick Reference
+
+| Symptom | Cause | Solution |
+|---------|-------|----------|
+| Old code running | Cached Docker image | `docker-compose build webhook` |
+| Orange connection | Missing STT credentials | Remove vendor config or configure credentials |
+| "Didn't catch that" | Wrong parsing path | Use `speech.alternatives[0].transcript` |
+| Call doesn't disconnect | TTS/hangup race | Add 1-sec `pause` before `hangup` |
+| No webhook invocation | CORS failure | Enable CORS with `flask_cors` |
+
+---
+
+## File Reference
+
+| File | Purpose |
+|------|---------|
+| `docker-compose.yaml` | Orchestrates all 13 microservices |
+| `init-db.sql` | Complete schema + seed data |
+| `drachtio.conf.xml` | Main Drachtio SIP server configuration |
+| `aumne-act-ccaas-internal-*.json` | Google Cloud credentials for STT |
+| `configuration.md` | This documentation |
+| `webhook/app.py` | Custom webhook application |
+| `webhook/Dockerfile` | Webhook container build instructions |
+| `webhook/requirements.txt` | Python dependencies |
+| `freeswitch/log/` | FreeSWITCH log directory |
+
+---
+
+**Document Version:** 2.1  
 **Last Updated:** 2026-01-19  
-**Status:** Feature Server routing loop resolved via sidecar Drachtio implementation
+**Status:** Complete with optimized setup instructions and webhook troubleshooting
